@@ -6,3 +6,7 @@ faiss-cpu
 sentence-transformers
 transformers
 pypdf
+huggingface_hub 
+python-docx 
+pillow 
+pytesseract
