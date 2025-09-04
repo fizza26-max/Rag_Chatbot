@@ -7,6 +7,7 @@ from langchain.chains import RetrievalQA
 from langchain.llms import HuggingFacePipeline
 from transformers import pipeline
 import tempfile
+from langchain.schema import Document
 import os
 import docx
 import easyocr
@@ -46,26 +47,25 @@ if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
 def load_txt(file):
-    return [{"page_content": file.read().decode("utf-8"), "metadata": {}}]
+    text = file.read().decode("utf-8")
+    return [Document(page_content=text, metadata={})]
 
 def load_docx(file):
     doc = docx.Document(file)
     full_text = []
     for para in doc.paragraphs:
         full_text.append(para.text)
-    return [{"page_content": "\n".join(full_text), "metadata": {}}]
+    return [Document(page_content="\n".join(full_text), metadata={})]
 
 def load_image(file):
-    # Use easyocr to extract text from image bytes
-    reader = easyocr.Reader(['en'], gpu=False)  # disable GPU for compatibility
-    # Save temporarily to disk because easyocr reads from path or numpy array
+    reader = easyocr.Reader(['en'], gpu=False)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         tmp_img.write(file.read())
         tmp_path = tmp_img.name
     result = reader.readtext(tmp_path, detail=0, paragraph=True)
     os.remove(tmp_path)
     text = "\n".join(result)
-    return [{"page_content": text, "metadata": {}}]
+    return [Document(page_content=text, metadata={})]
 
 uploaded_file = st.file_uploader("Upload Document", type=["pdf", "txt", "docx", "png", "jpg", "jpeg"])
 
