@@ -8,16 +8,14 @@ from langchain.llms import HuggingFacePipeline
 from transformers import pipeline
 import tempfile
 import os
-from docx import Document
-import pytesseract
-from PIL import Image
+import docx
+import easyocr
 
 # Page setup
 st.set_page_config(page_title="AI Document Search", page_icon="📄")
 
 # Custom CSS
-st.markdown(
-    """
+st.markdown("""
     <style>
     .main {
         background-color: #ffffff;
@@ -36,9 +34,7 @@ st.markdown(
         color: white;
     }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 st.title("📄 AI Document Search (RAG Chatbot)")
 st.write("Upload a document (PDF, TXT, DOCX, or Image) and ask questions about its content.")
@@ -49,104 +45,80 @@ if "qa_chain" not in st.session_state:
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
-def extract_text_from_docx(path):
-    doc = Document(path)
+def load_txt(file):
+    return [{"page_content": file.read().decode("utf-8"), "metadata": {}}]
+
+def load_docx(file):
+    doc = docx.Document(file)
     full_text = []
     for para in doc.paragraphs:
         full_text.append(para.text)
-    return "\n".join(full_text)
+    return [{"page_content": "\n".join(full_text), "metadata": {}}]
 
-def extract_text_from_image(image_path):
-    try:
-        img = Image.open(image_path)
-        # Use pytesseract to do OCR on the image
-        text = pytesseract.image_to_string(img)
-        return text
-    except Exception as e:
-        st.error(f"Failed to process image OCR: {e}")
-        return ""
+def load_image(file):
+    # Use easyocr to extract text from image bytes
+    reader = easyocr.Reader(['en'], gpu=False)  # disable GPU for compatibility
+    # Save temporarily to disk because easyocr reads from path or numpy array
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+        tmp_img.write(file.read())
+        tmp_path = tmp_img.name
+    result = reader.readtext(tmp_path, detail=0, paragraph=True)
+    os.remove(tmp_path)
+    text = "\n".join(result)
+    return [{"page_content": text, "metadata": {}}]
 
-def process_uploaded_file(uploaded_file_path, file_extension):
-    text = ""
-    try:
-        if file_extension == ".pdf":
-            loader = PyPDFLoader(uploaded_file_path)
-            documents = loader.load()
-            # Extract combined text
-            text = "\n".join([doc.page_content for doc in documents])
-        elif file_extension == ".txt":
-            with open(uploaded_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-        elif file_extension == ".docx":
-            text = extract_text_from_docx(uploaded_file_path)
-        elif file_extension in [".jpg", ".jpeg", ".png"]:
-            text = extract_text_from_image(uploaded_file_path)
-        else:
-            st.error(f"Unsupported file type: {file_extension}")
-            return None
-    except Exception as e:
-        st.error(f"Failed to extract text from file: {e}")
-        return None
-    return text
-
-uploaded_file = st.file_uploader(
-    "Upload file", type=["pdf", "txt", "docx", "jpg", "jpeg", "png"]
-)
+uploaded_file = st.file_uploader("Upload Document", type=["pdf", "txt", "docx", "png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
-    if st.button("Process File"):
-        with st.spinner("Processing file..."):
-            try:
-                suffix = os.path.splitext(uploaded_file.name)[1].lower()
+    if st.button("Process Document"):
+        with st.spinner("Processing document..."):
+            suffix = os.path.splitext(uploaded_file.name)[1].lower()
+
+            # Load documents based on file type
+            if suffix == ".pdf":
+                # Save temporarily
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(uploaded_file.read())
                     tmp_path = tmp.name
-
-                # Extract text from file
-                raw_text = process_uploaded_file(tmp_path, suffix)
-                if not raw_text or raw_text.strip() == "":
-                    st.error("No text could be extracted from the file.")
-                    os.remove(tmp_path)
-                    st.session_state.qa_chain = None
-                    st.session_state.vectorstore = None
-                else:
-                    # Chunk text
-                    text_splitter = RecursiveCharacterTextSplitter(
-                        chunk_size=1000, chunk_overlap=200
-                    )
-                    fake_docs = [{"page_content": raw_text}]
-                    docs = text_splitter.split_documents(fake_docs)
-
-                    # Embeddings - more accurate model
-                    embeddings = HuggingFaceEmbeddings(
-                        model_name="sentence-transformers/all-MiniLM-L12-v2"
-                    )
-                    st.session_state.vectorstore = FAISS.from_documents(docs, embeddings)
-                    retriever = st.session_state.vectorstore.as_retriever()
-
-                    # LLM - stronger open source model from HF Hub
-                    generator = pipeline(
-                        "text2text-generation",
-                        model="google/flan-t5-xl",
-                        device=0 if torch.cuda.is_available() else -1,
-                        max_length=512,
-                        do_sample=False,
-                    )
-                    llm = HuggingFacePipeline(pipeline=generator)
-
-                    # QA chain
-                    st.session_state.qa_chain = RetrievalQA.from_chain_type(
-                        llm=llm, chain_type="stuff", retriever=retriever
-                    )
-
-                    st.success(f"✅ File '{uploaded_file.name}' processed and indexed!")
+                loader = PyPDFLoader(tmp_path)
+                documents = loader.load()
                 os.remove(tmp_path)
-            except Exception as e:
-                st.error(f"Failed to process file: {e}")
-                st.session_state.qa_chain = None
-                st.session_state.vectorstore = None
+            elif suffix == ".txt":
+                documents = load_txt(uploaded_file)
+            elif suffix == ".docx":
+                documents = load_docx(uploaded_file)
+            elif suffix in [".png", ".jpg", ".jpeg"]:
+                documents = load_image(uploaded_file)
+            else:
+                st.error("Unsupported file type!")
+                st.stop()
 
-# Ask questions
+            # Split text into chunks
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            docs = text_splitter.split_documents(documents)
+
+            # Embeddings - more accurate model
+            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+            st.session_state.vectorstore = FAISS.from_documents(docs, embeddings)
+            retriever = st.session_state.vectorstore.as_retriever()
+
+            # LLM - larger and more accurate open source model
+            generator = pipeline(
+                "text2text-generation",
+                model="google/flan-t5-large",
+                device=0 if os.environ.get("CUDA_VISIBLE_DEVICES") else -1,
+                max_length=512,
+                do_sample=False,
+            )
+            llm = HuggingFacePipeline(pipeline=generator)
+
+            # QA chain
+            st.session_state.qa_chain = RetrievalQA.from_chain_type(
+                llm=llm, chain_type="stuff", retriever=retriever
+            )
+
+            st.success(f"✅ Document '{uploaded_file.name}' processed and indexed!")
+
 query = st.text_input("Ask a question about the document:")
 
 if query:
